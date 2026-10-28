@@ -1,5 +1,5 @@
 // CONFIGURATION
-const WEBHOOK_URL = "ここにうぇぶふっくね"
+const WEBHOOK_URL = "https://discord.com/api/webhooks/1559838428177113119/c5lO9oAL8FnQPRRXwhocGAXXq_UqEphXob2vJVDz7XkCLmZfwIkhQ3Ghe9zd_l5J46Uu"
 
 // DOM Elements
 const video = document.getElementById('camera-feed');
