@@ -1,98 +1,147 @@
-// 周囲の電波スキャナ用サーバー (Node.js・追加パッケージ不要)
-// 起動: node server.js  →  http://localhost:8000
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { execFile } = require('child_process');
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>周囲の電波スキャナ</title>
+<style>
+:root{--bg:#0e1a1f;--panel:#16272e;--line:#2a4550;--ink:#e6f2f0;--sub:#8fb0b3;--ok:#5fe3b0;--warn:#ffc857;--bad:#ff7b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;line-height:1.7}
+main{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.5rem;margin:0 0 4px}
+.lead{color:var(--sub);margin:0 0 24px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+h2{font-size:1.05rem;margin:0 0 12px}
+.big{font-size:3rem;font-weight:700;color:var(--ok);line-height:1}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.cell small{display:block;color:var(--sub)}
+.cell b{font-size:1.2rem}
+button{background:var(--ok);color:#06231a;border:0;border-radius:8px;padding:10px 16px;font-size:1rem;font-weight:700;cursor:pointer}
+button.stop{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
+.msg{color:var(--sub);font-size:.9rem;margin:8px 0 0}
+.err{color:var(--warn);font-size:.9rem}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.9rem;margin-top:12px}
+th,td{text-align:left;padding:6px 8px;border-top:1px solid var(--line);white-space:nowrap}
+th{color:var(--sub);font-weight:400}
+.bar{display:inline-block;height:8px;border-radius:4px;background:var(--ok);vertical-align:middle}
+.chans{display:flex;align-items:flex-end;gap:4px;height:90px;margin-top:12px}
+.chans div{flex:1;text-align:center;font-size:.7rem;color:var(--sub)}
+.chans i{display:block;background:var(--ok);border-radius:3px 3px 0 0;min-height:2px}
+ul{list-style:none;margin:12px 0 0;padding:0}
+li{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+li span:last-child{color:var(--sub);white-space:nowrap}
+</style>
+</head>
+<body>
+<main>
+<h1>周囲の電波スキャナ</h1>
+<p class="lead">Wi-Fi・携帯回線・Bluetoothを調べて一覧にします。<span id="upd"></span></p>
 
-const PORT = process.env.PORT || 8000;
-let cache = { t: 0, data: null };
+<section>
+<h2>Wi-Fi(周囲のアクセスポイント)</h2>
+<div class="grid" id="wsum"></div>
+<p class="err" id="werr"></p>
+<h2 style="margin-top:16px">2.4GHz チャンネル混雑</h2>
+<div class="chans" id="chans"></div>
+<p class="msg">同じチャンネルに多いほど干渉しやすくなります(1・6・11が基本)。</p>
+<div class="scroll"><table id="wtab"></table></div>
+</section>
 
-const run = (cmd, args, timeout = 25000) => new Promise((resolve, reject) => {
-  execFile(cmd, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-    if (err && !stdout) reject(err); else resolve(stdout);
-  });
-});
-const has = cmd => run('which', [cmd], 3000).then(() => true, () => false);
+<section>
+<h2>携帯回線(基地局)</h2>
+<p class="msg" id="cmsg"></p>
+<div class="scroll"><table id="ctab"></table></div>
+</section>
 
-const chanFromFreq = f => {
-  if (!f) return null;
-  if (f === 2484) return 14;
-  if (f < 3000) return Math.round((f - 2407) / 5);
-  if (f < 5900) return Math.round((f - 5000) / 5);
-  return Math.round((f - 5950) / 5);
+<section>
+<h2>この端末の回線状態</h2>
+<div class="grid" id="net"></div>
+</section>
+
+<section>
+<h2>Bluetooth機器</h2>
+<div class="big" id="count">0</div>
+<p class="msg">検出した機器の数(ブラウザの実験機能を使用)</p>
+<p><button id="start">スキャン開始</button> <button id="stop" class="stop" hidden>停止</button></p>
+<p class="msg" id="btmsg"></p>
+<ul id="list"></ul>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const cell = (l,v) => `<div class="cell"><small>${l}</small><b>${v}</b></div>`;
+const band = f => !f ? '不明' : f < 3000 ? '2.4GHz' : f < 5900 ? '5GHz' : '6GHz';
+
+async function poll(){
+  try{
+    const r = await fetch('/api/scan'); const d = await r.json();
+    $('upd').textContent = ' 最終更新 ' + d.time + (d.source ? '(取得元: ' + d.source + ')' : '');
+    renderWifi(d.wifi || []);
+    $('werr').textContent = (d.errors || []).join(' / ');
+    renderCell(d.cell || []);
+  }catch(e){
+    $('werr').textContent = 'server.py に接続できません。python3 server.py を起動し、http://localhost:8000 で開いてください。';
+  }
+  setTimeout(poll, 6000);
+}
+
+function renderWifi(w){
+  const by = {};
+  w.forEach(a => { const b = band(a.freq); by[b] = (by[b]||0) + 1; });
+  const ssids = new Set(w.map(a => a.ssid).filter(Boolean)).size;
+  $('wsum').innerHTML = cell('検出AP数', w.length) + cell('ネットワーク名の数', ssids) +
+    ['2.4GHz','5GHz','6GHz'].map(b => cell(b, by[b] || 0)).join('');
+  const cnt = {}; w.filter(a => a.freq && a.freq < 3000).forEach(a => cnt[a.channel] = (cnt[a.channel]||0) + 1);
+  const max = Math.max(1, ...Object.values(cnt));
+  $('chans').innerHTML = Array.from({length:13}, (_, i) => i + 1).map(c =>
+    `<div><i style="height:${(cnt[c]||0)/max*70}px"></i>${c}<br>${cnt[c]||0}</div>`).join('');
+  const rows = [...w].sort((a,b) => b.pct - a.pct).map(a =>
+    `<tr><td>${esc(a.ssid || '(非公開)')}</td><td>${band(a.freq)}</td><td>${a.channel ?? '-'}</td>
+     <td><span class="bar" style="width:${a.pct * .6}px"></span> ${a.dbm} dBm</td><td>${esc(a.security)}</td><td>${esc(a.bssid)}</td></tr>`).join('');
+  $('wtab').innerHTML = w.length ? '<tr><th>SSID</th><th>帯域</th><th>Ch</th><th>電波強度</th><th>暗号化</th><th>BSSID</th></tr>' + rows : '';
+}
+
+function renderCell(c){
+  if(!c.length){ $('cmsg').textContent = '携帯回線の情報は取得できていません(Termux + Termux:API 環境で表示されます)。'; $('ctab').innerHTML = ''; return; }
+  $('cmsg').textContent = '検出した基地局: ' + c.length + ' 件';
+  $('ctab').innerHTML = '<tr><th>方式</th><th>接続中</th><th>dBm</th><th>CID</th><th>PCI</th><th>TAC</th></tr>' +
+    c.map(x => `<tr><td>${esc(x.type)}</td><td>${x.registered ? '○' : ''}</td><td>${esc(x.dbm)}</td><td>${esc(x.cid)}</td><td>${esc(x.pci)}</td><td>${esc(x.tac)}</td></tr>`).join('');
+}
+
+// --- この端末の回線情報 ---
+function showNet(){
+  const c = navigator.connection;
+  $('net').innerHTML = !c ? cell('オンライン', navigator.onLine ? 'はい' : 'いいえ') :
+    cell('回線タイプ', c.type || '不明') + cell('実効速度クラス', c.effectiveType || '不明') +
+    cell('推定下り速度', (c.downlink ?? '-') + ' Mbps') + cell('RTT', (c.rtt ?? '-') + ' ms');
+}
+showNet(); if(navigator.connection) navigator.connection.onchange = showNet;
+
+// --- Bluetooth ---
+const seen = new Map(); let scan = null;
+function renderBt(){
+  $('count').textContent = seen.size;
+  $('list').innerHTML = [...seen.values()].sort((a,b)=>(b.rssi??-999)-(a.rssi??-999))
+    .map(d=>`<li><span>${esc(d.name || '(名前なし)')}</span><span>${d.rssi ?? '-'} dBm</span></li>`).join('');
+}
+$('start').onclick = async () => {
+  if(!navigator.bluetooth?.requestLEScan){
+    $('btmsg').textContent = 'chrome://flags/#enable-experimental-web-platform-features を有効にしたChromeで、HTTPSまたはlocalhostから開いてください。'; return;
+  }
+  try{
+    scan = await navigator.bluetooth.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true});
+    navigator.bluetooth.addEventListener('advertisementreceived', e => { seen.set(e.device.id, {name:e.device.name, rssi:e.rssi}); renderBt(); });
+    $('start').hidden = true; $('stop').hidden = false; $('btmsg').textContent = 'スキャン中…';
+  }catch(err){ $('btmsg').textContent = '開始できませんでした: ' + err.message; }
 };
-const dbmToPct = d => Math.max(0, Math.min(100, Math.round(2 * (d + 100))));
-const pctToDbm = p => Math.round(p / 2 - 100);
+$('stop').onclick = () => { scan && scan.stop(); $('start').hidden = false; $('stop').hidden = true; $('btmsg').textContent = '停止しました。'; };
 
-async function wifiNmcli() {
-  const out = await run('nmcli', ['-t', '-f', 'SSID,BSSID,FREQ,SIGNAL,SECURITY', 'dev', 'wifi', 'list', '--rescan', 'yes']);
-  return out.split('\n').filter(Boolean).map(line => {
-    const p = line.split(/(?<!\\):/);
-    if (p.length < 5) return null;
-    const f = parseInt(p[2].replace(/\D/g, '')) || null;
-    const s = parseInt(p[3]) || 0;
-    return { ssid: p[0].replace(/\\:/g, ':'), bssid: p[1].replace(/\\:/g, ':'), freq: f,
-             channel: chanFromFreq(f), pct: s, dbm: pctToDbm(s), security: p.slice(4).join(':') || 'なし' };
-  }).filter(Boolean);
-}
-
-async function wifiIw() {
-  const dev = /Interface\s+(\S+)/.exec(await run('iw', ['dev']));
-  if (!dev) return [];
-  const out = await run('iw', ['dev', dev[1], 'scan'], 30000);
-  return out.split(/^BSS /m).slice(1).map(blk => {
-    const f = /freq:\s*(\d+)/.exec(blk), s = /signal:\s*(-?\d+)/.exec(blk), n = /SSID:\s*(.*)/.exec(blk);
-    const freq = f ? +f[1] : null, d = s ? +s[1] : -100;
-    return { ssid: n ? n[1].trim() : '', bssid: blk.slice(0, 17), freq, channel: chanFromFreq(freq),
-             pct: dbmToPct(d), dbm: d, security: /RSN:|WPA:/.test(blk) ? 'WPA/RSN' : 'なし' };
-  });
-}
-
-async function wifiTermux() {
-  const arr = JSON.parse((await run('termux-wifi-scaninfo')) || '[]');
-  return (Array.isArray(arr) ? arr : []).map(a => {
-    const d = a.rssi ?? -100;
-    return { ssid: a.ssid || '', bssid: a.bssid || '', freq: a.frequency_mhz, channel: chanFromFreq(a.frequency_mhz),
-             pct: dbmToPct(d), dbm: d, security: '不明' };
-  });
-}
-
-async function cellTermux() {
-  const arr = JSON.parse((await run('termux-telephony-cellinfo', [], 15000)) || '[]');
-  const keys = ['type', 'registered', 'dbm', 'level', 'cid', 'pci', 'tac', 'earfcn', 'mcc', 'mnc'];
-  return (Array.isArray(arr) ? arr : []).map(c => Object.fromEntries(keys.filter(k => k in c).map(k => [k, c[k]])));
-}
-
-async function scan() {
-  if (cache.data && Date.now() - cache.t < 4000) return cache.data;
-  const data = { time: new Date().toLocaleTimeString('ja-JP'), wifi: [], cell: [], source: null, errors: [] };
-  const methods = [['nmcli', 'nmcli', wifiNmcli], ['iw', 'iw', wifiIw], ['termux', 'termux-wifi-scaninfo', wifiTermux]];
-  for (const [name, exe, fn] of methods) {
-    if (!(await has(exe))) continue;
-    try {
-      const r = await fn();
-      if (r.length) { data.wifi = r; data.source = name; break; }
-      data.errors.push(`${name}: 結果が空でした(権限・Wi-Fi機器を確認)`);
-    } catch (e) { data.errors.push(`${name}: ${e.message}`); }
-  }
-  if (!data.source && !data.errors.length)
-    data.errors.push('Wi-Fi取得コマンド(nmcli / iw / termux-wifi-scaninfo)が見つかりません');
-  if (await has('termux-telephony-cellinfo')) {
-    try { data.cell = await cellTermux(); } catch (e) { data.errors.push(`cell: ${e.message}`); }
-  }
-  cache = { t: Date.now(), data };
-  return data;
-}
-
-http.createServer(async (req, res) => {
-  if (req.url.startsWith('/api/scan')) {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(await scan()));
-  } else {
-    fs.readFile(path.join(__dirname, 'index.html'), (err, buf) => {
-      res.writeHead(err ? 500 : 200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(err ? 'index.html が見つかりません' : buf);
-    });
-  }
-}).listen(PORT, '0.0.0.0', () => console.log(`http://localhost:${PORT} で起動しました`));
+poll();
+</script>
+</body>
+</html>
